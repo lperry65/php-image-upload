@@ -12,12 +12,12 @@
 		const COPY = 1;
 		const RESIZE = 2;
 		const SCALE = 3;
+		const MAX_FILE_SIZE = 5 * 1024 * 1024;
 		
 		// Member properties
 		private $_destFile;
 		private $_error;
 		private $_fileExtension;
-		private $_fileSavePath;
 		private $_filename;
 		private $_fileType;
 		private $_tmpName;
@@ -25,7 +25,7 @@
 
 		private $_imageProcessingTypes;
 		private $_maxWidth;
-		private $_maxHight;
+		private $_maxHeight;
 		private $_targetImage;
 		private $_imageSource;
 		private $_sourceWidth;
@@ -36,11 +36,9 @@
 		private $_imgLoaders;
 		private $_imgCreators;
 		
-		function __construct($fileSavePath) {
+		function __construct(private readonly string $fileSavePath) {
 		  
-		  if (!empty($fileSavePath)) {
-		    $this->_fileSavePath = $fileSavePath;
-		  } else {
+		  if (empty($fileSavePath)) {
 		    throw new Exception('Path to save file is required');
 		  }
 																					
@@ -69,16 +67,26 @@
 		 * public function uploadImage
 		 *
 		 * @param string $image 
-		 * @param string $fileSaveName 
-		 * @param string $imageProcessingType 
-		 * @param string $maxWidth 
-		 * @param string $maxHeight 
+		 * @param string $filename 
+		 * @param int $imageProcessingType 
+		 * @param int $maxWidth 
+		 * @param int $maxHeight 
 		 * @return void
 		 * @author Lee Perry
 		 */
 		
-		public function uploadImage($image, $filename, $imageProcessingType, $maxWidth = 0, $maxHeight = 0) {
+		public function uploadImage(string $image, string $filename, int $imageProcessingType, int $maxWidth = 0, int $maxHeight = 0): void {
 				
+		  if (!is_uploaded_file($image)) {
+		    throw new Exception('Invalid uploaded file.');
+		  }
+
+		  if (filesize($image) > self::MAX_FILE_SIZE) {
+		    throw new Exception('File exceeds maximum allowed size.');
+		  }
+
+		  $filename = ltrim(preg_replace('/[^a-zA-Z0-9_\-]/', '', basename($filename)), '-');
+
 		  if (!empty($filename)) {
 		   $this->_filename = $filename;
 		  } else {
@@ -122,33 +130,36 @@
 				  }
            
            // Process image 
-					switch ($imageProcessingType) {					 
-					  case self::COPY:
-						  $this->_targetImage = $this->_imageSource;
-					    break;
-
-					  case self::RESIZE:
-						  $this->_destWidth = $this->_maxWidth;
-						  $this->_destHeight = $this->_maxHeight;
-     					$this->createImage();
-     			    break;
-					  
-					  case self::SCALE:
-						  $this->scaleImage();
-     					$this->createImage();
-     			    break;
-					}
+					match ($imageProcessingType) {
+						self::COPY => $this->_targetImage = $this->_imageSource,
+						self::RESIZE => (function (): void {
+							$this->_destWidth = $this->_maxWidth;
+							$this->_destHeight = $this->_maxHeight;
+							$this->createImage();
+						})(),
+						self::SCALE => (function (): void {
+							$this->scaleImage();
+							$this->createImage();
+						})(),
+					};
 				} else {
 				 throw new Exception('Invalid image process type');
 				}
 				
 				// Destination file.
-				$this->_destFile = $this->_fileSavePath.'/'.$this->_filename.'.'.$this->_fileExtension;
+				$this->_destFile = $this->fileSavePath.'/'.$this->_filename.'.'.$this->_fileExtension;
 
-				// Save image.
-				imagejpeg ($this->_targetImage, $this->_destFile);
+				// Save image using the correct format.
+				$imgCreator = $this->_imgCreators[$imageInfo['mime']] ?? null;
+				if ($imgCreator === null) {
+					throw new Exception('Unsupported file type.');
+				}
+				$imgCreator($this->_targetImage, $this->_destFile);
 				
-				// Free up memory
+				// Free up memory (guard against double-free in COPY mode)
+				if ($this->_targetImage !== $this->_imageSource) {
+					imagedestroy($this->_imageSource);
+				}
 				imagedestroy($this->_targetImage);
 				
 			} else {
@@ -163,7 +174,7 @@
 		 * @author Lee Perry
 		 */
 		
-		private function scaleImage() {
+		private function scaleImage(): void {
 			if ($this->_sourceWidth > $this->_sourceHeight) {
 				$this->_destWidth = $this->_maxWidth;
 				$this->_destHeight = floor ($this->_sourceHeight * ($this->_maxWidth/$this->_sourceWidth));
@@ -201,9 +212,17 @@
 		 * @author Lee Perry
 		 */
 		
-		private function createImage() {
+		private function createImage(): void {
 			// Create blank destination image.
 			$this->_targetImage = imagecreatetruecolor($this->_destWidth, $this->_destHeight);
+
+			// Preserve transparency for PNG and GIF images.
+			if (in_array($this->_fileExtension, ['png', 'gif'])) {
+				imagealphablending($this->_targetImage, false);
+				imagesavealpha($this->_targetImage, true);
+				$transparent = imagecolorallocatealpha($this->_targetImage, 0, 0, 0, 127);
+				imagefill($this->_targetImage, 0, 0, $transparent);
+			}
 
 			// Resize the original picture and copy it onto the newly created image object.
 			imagecopyresampled(
